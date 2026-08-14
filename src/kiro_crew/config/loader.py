@@ -101,12 +101,15 @@ from kiro_crew.effort import EFFORT_LEVELS, is_valid_effort, model_supports_effo
 from kiro_crew.instances.constants import CONNECT_TIMEOUT_CEILING_SECS as _CONNECT_TIMEOUT_CEILING
 from kiro_crew.instances.constants import DEFAULT_CONNECT_TIMEOUT_SECS as _DEFAULT_CONNECT_TIMEOUT
 from kiro_crew.instances.constants import DEFAULT_MAX_RECOVERY_ATTEMPTS as _DEFAULT_MAX_RECOVERY
+from kiro_crew.instances.constants import DEFAULT_MINT_TIMEOUT_SECS as _DEFAULT_MINT_TIMEOUT
 from kiro_crew.instances.constants import DEFAULT_PROBE_FAILURE_THRESHOLD as _DEFAULT_PROBE_FAILS
 from kiro_crew.instances.constants import DEFAULT_RECOVER_BACKOFF_MAX_SECS as _DEFAULT_BACKOFF_MAX
 from kiro_crew.instances.constants import DEFAULT_SSH_COMPRESSION as _DEFAULT_SSH_COMPRESSION
 from kiro_crew.instances.constants import DEFAULT_TUNNEL_BASE_PORT as _DEFAULT_TUNNEL_BASE_PORT
 from kiro_crew.instances.constants import DEFAULT_WARM_SET_CAP as _DEFAULT_WARM_SET_CAP
 from kiro_crew.instances.constants import MAX_RECOVERY_ATTEMPTS_CEILING as _MAX_RECOVERY_CEILING
+from kiro_crew.instances.constants import MINT_TIMEOUT_CEILING_SECS as _MINT_TIMEOUT_CEILING
+from kiro_crew.instances.constants import MINT_TIMEOUT_FLOOR_SECS as _MINT_TIMEOUT_FLOOR
 from kiro_crew.instances.constants import (
     RECOVER_BACKOFF_MAX_CEILING_SECS as _RECOVER_BACKOFF_CEILING,
 )
@@ -4275,6 +4278,19 @@ class InstancesConfig:
             "is explicitly set. Clamped to [1, 120].",
         ),
     )
+    mint_timeout_secs: float = field(
+        default=_DEFAULT_MINT_TIMEOUT,
+        metadata=_meta(
+            "Mint Timeout (secs)",
+            "How long to wait for the remote `kirocrew token` mint to return "
+            "before failing a connect. The mint runs over the same ssh transport "
+            "as the tunnel, so a host behind a ProxyCommand or jump host pays "
+            "the proxy handshake here too. A value other than the default (30) "
+            "applies to BOTH transports — including SSM, which otherwise uses "
+            "its own higher 90s default — so size it for the slowest transport "
+            "you use. Clamped to [10, 120].",
+        ),
+    )
     max_recovery_attempts: int = field(
         default=_DEFAULT_MAX_RECOVERY,
         metadata=_meta(
@@ -4329,6 +4345,22 @@ class InstancesConfig:
                 _CONNECT_TIMEOUT_CEILING,
             )
             object.__setattr__(self, "connect_timeout_secs", _CONNECT_TIMEOUT_CEILING)
+        if self.mint_timeout_secs < _MINT_TIMEOUT_FLOOR:
+            logger.warning(
+                "instances.mint_timeout_secs %s < %s, using %s",
+                self.mint_timeout_secs,
+                _MINT_TIMEOUT_FLOOR,
+                _DEFAULT_MINT_TIMEOUT,
+            )
+            object.__setattr__(self, "mint_timeout_secs", _DEFAULT_MINT_TIMEOUT)
+        elif self.mint_timeout_secs > _MINT_TIMEOUT_CEILING:
+            logger.warning(
+                "instances.mint_timeout_secs %s > %s, clamping to %s",
+                self.mint_timeout_secs,
+                _MINT_TIMEOUT_CEILING,
+                _MINT_TIMEOUT_CEILING,
+            )
+            object.__setattr__(self, "mint_timeout_secs", _MINT_TIMEOUT_CEILING)
         if self.max_recovery_attempts < 1:
             logger.warning(
                 "instances.max_recovery_attempts %d < 1, using %d",
@@ -6364,6 +6396,10 @@ class KiroCrewConfig:
                 connect_timeout_secs=_safe_float(
                     instances_data.get("connect_timeout_secs", _DEFAULT_CONNECT_TIMEOUT),
                     _DEFAULT_CONNECT_TIMEOUT,
+                ),
+                mint_timeout_secs=_safe_float(
+                    instances_data.get("mint_timeout_secs", _DEFAULT_MINT_TIMEOUT),
+                    _DEFAULT_MINT_TIMEOUT,
                 ),
                 max_recovery_attempts=_safe_int(
                     instances_data.get("max_recovery_attempts", _DEFAULT_MAX_RECOVERY),

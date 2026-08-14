@@ -4,6 +4,16 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **The instance token-mint timeout is now user-configurable.** The remote
+  `kirocrew token` mint ran with a hardcoded 30s budget, so a user behind a
+  slow ProxyCommand/jump host timed out in the mint step even when the ssh
+  forward itself came up (the connect flow spawns two proxy-bound ssh
+  children, and the mint is the second one). A new
+  `instances.mint_timeout_secs` (default 30, clamped to [10, 120]) now
+  threads through the tunnel manager to both the SSH and SSM mint paths;
+  a non-default value applies to both transports, and the SSM transport
+  keeps its higher 90s default when the value is left at the default. (#3566)
+
 - **A lesson from a previous embedding-model generation could no longer get
   silently deleted or offered as a false contradiction.** `write_lesson`'s
   semantic dedup and `find_contradiction_candidates` compared raw embeddings

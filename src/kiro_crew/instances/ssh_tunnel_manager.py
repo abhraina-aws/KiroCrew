@@ -69,6 +69,7 @@ from kiro_crew.instances.constants import (
     DEFAULT_CONNECT_TIMEOUT_SECS as _DEFAULT_CONNECT_TIMEOUT_SECS,
 )
 from kiro_crew.instances.constants import DEFAULT_MAX_RECOVERY_ATTEMPTS as _MAX_RECOVERY
+from kiro_crew.instances.constants import DEFAULT_MINT_TIMEOUT_SECS as _DEFAULT_MINT_TIMEOUT_SECS
 from kiro_crew.instances.constants import DEFAULT_PROBE_FAILURE_THRESHOLD as _PROBE_FAILS
 from kiro_crew.instances.constants import DEFAULT_PROBE_INTERVAL_SECS as _PROBE_INTERVAL
 from kiro_crew.instances.constants import (
@@ -77,6 +78,9 @@ from kiro_crew.instances.constants import (
 from kiro_crew.instances.constants import DEFAULT_SESSION_TRANSFER_TIMEOUT_SECS as _TRANSFER_TIMEOUT
 from kiro_crew.instances.constants import (
     DEFAULT_SSM_CONNECT_TIMEOUT_SECS as _DEFAULT_SSM_CONNECT_TIMEOUT_SECS,
+)
+from kiro_crew.instances.constants import (
+    DEFAULT_SSM_MINT_TIMEOUT_SECS as _DEFAULT_SSM_MINT_TIMEOUT_SECS,
 )
 from kiro_crew.instances.constants import DEFAULT_TOKEN_PROBE_TIMEOUT_SECS as _TOKEN_PROBE_TIMEOUT
 from kiro_crew.instances.constants import DEFAULT_TOKEN_REFRESH_FRACTION as _REFRESH_FRACTION
@@ -763,6 +767,7 @@ class SshTunnelManager:
         max_recovery_attempts: int = _MAX_RECOVERY,
         recover_backoff_max_secs: float = _RECOVER_BACKOFF_MAX_SECS,
         probe_failure_threshold: int = _PROBE_FAILS,
+        mint_timeout_secs: float = _DEFAULT_MINT_TIMEOUT_SECS,
         mint_token: Callable[..., Awaitable[str]] = mint_remote_token,
         tunnel_factory: Callable[..., _SshTunnel] | None = None,
         parent_port: int | None = None,
@@ -790,6 +795,7 @@ class SshTunnelManager:
         self._max_recovery = max_recovery_attempts
         self._recover_backoff_max = recover_backoff_max_secs
         self._probe_fails = probe_failure_threshold
+        self._mint_timeout = mint_timeout_secs
         self._mint_token = mint_token
         self._tunnel_factory = tunnel_factory or _SshTunnel
         # Only the real ssh path reaps OS-level orphans; injected fakes (tests)
@@ -888,6 +894,23 @@ class SshTunnelManager:
         if method == "ssm":
             return _DEFAULT_SSM_CONNECT_TIMEOUT_SECS
         return self._connect_timeout
+
+    def _mint_timeout_for(self, method: str) -> float:
+        """Token-mint timeout for *method*, honoring a non-default override.
+
+        Mirrors :meth:`_connect_timeout_for`: the SSM mint dispatches
+        ``aws ssm send-command`` and polls ``get-command-invocation``, whose
+        dispatch latency (agent poll interval) makes its default higher. A
+        value other than the SSH default (config, tests) wins for both
+        transports; a value equal to the default is indistinguishable from
+        unset, so SSM keeps its higher default in that case (same in-band
+        sentinel convention as the connect timeout).
+        """
+        if self._mint_timeout != _DEFAULT_MINT_TIMEOUT_SECS:
+            return self._mint_timeout  # explicit override
+        if method == "ssm":
+            return _DEFAULT_SSM_MINT_TIMEOUT_SECS
+        return self._mint_timeout
 
     async def _ps_lines(self) -> list[str]:
         """Return ``<pid> <command>`` lines for all processes (portable ps).
@@ -992,6 +1015,7 @@ class SshTunnelManager:
                 ttl=inst.ttl,
                 remote_port=inst.remote_port,
                 embed_parent_port=self._parent_port,
+                timeout_secs=self._mint_timeout_for(params.method),
             )
         return await self._mint_token(
             params.ssh_host,
@@ -999,6 +1023,7 @@ class SshTunnelManager:
             ttl=inst.ttl,
             remote_port=inst.remote_port,
             embed_parent_port=self._parent_port,
+            timeout_secs=self._mint_timeout_for(params.method),
         )
 
     async def connect(self, instance_id: str) -> TunnelStatus:
