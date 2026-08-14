@@ -7,6 +7,13 @@
  * window (see trafficLightPositionForZoom in electron/main.js — x=16,
  * vertically centered in the 42px header, rescaled on zoom). The header gets
  * a left inset clearing them via the `.mac-electron` rule in index.css.
+ *
+ * On Linux the shell goes frameless (frame:false) on desktops that prefer
+ * client-side decorations (see electron/linux-frame.js); the header still
+ * doubles as the title bar via an injected drag region, but there are no
+ * traffic lights and no caption overlay, so the header needs NO inset —
+ * neither `.mac-electron` nor `.win-electron` applies, which is the correct
+ * zero-inset layout, locked in by App.linuxElectron.test.tsx.
  */
 const mc = (window as { kirocrew?: { isElectron?: boolean; platform?: string } }).kirocrew
 

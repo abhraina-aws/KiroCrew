@@ -4,6 +4,19 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **The Linux desktop app no longer shows two title bars on GNOME-family
+  desktops.** The window manager's native decoration used to stack on top of
+  the dashboard's own 42px header, wasting vertical space and duplicating
+  controls. On desktops that prefer client-side decorations (GNOME, Ubuntu,
+  Unity, Pantheon, Budgie) the window now drops the native frame and the
+  header doubles as the title bar — with an injected drag region, exactly as
+  on macOS and Windows. Desktops that expect server-side decorations (KDE,
+  XFCE, tiling window managers) and unknown environments keep the native
+  frame, because going frameless there would strip WM-provided dragging and
+  edge-resize. The `linuxFrameless` key in the desktop app's own settings
+  store forces either shape. Connection windows follow the same decision.
+  (#3606)
+
 - **A lesson from a previous embedding-model generation could no longer get
   silently deleted or offered as a false contradiction.** `write_lesson`'s
   semantic dedup and `find_contradiction_candidates` compared raw embeddings

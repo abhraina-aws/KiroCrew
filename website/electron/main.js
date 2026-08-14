@@ -101,6 +101,7 @@ const store = new Store({
     themeAccent: "",                       // user's resolved theme accent hex; injected into the boot splash
     updateChannel: "",                     // "" = follow build stamp; "insider"|"stable" = user opt-in (Settings > About)
     runLocalGateway: true,                 // false = act as a pure client; never start a gateway on this machine
+    linuxFrameless: null,                  // Linux window chrome: true = frameless, false = native frame, null = follow the desktop environment (see linux-frame.js)
   },
 });
 
@@ -157,6 +158,15 @@ const POLL_INTERVAL_MS = 500;
 const MAX_WAIT_MS = 30_000; // 30s max wait for backend
 const IS_MAC = process.platform === "darwin";
 const IS_WIN = process.platform === "win32";
+const IS_LINUX = process.platform === "linux";
+// Whether Linux windows drop the native frame so the dashboard's 42px header
+// can double as the title bar (as on macOS/Windows) instead of stacking under
+// the WM's own decoration. Decided ONCE at launch from the desktop
+// environment plus the operator override, because every window in the process
+// must agree (see linux-frame.js for the full contract).
+const { decideLinuxFrame } = require("./linux-frame");
+const LINUX_FRAMELESS = IS_LINUX
+  && decideLinuxFrame({ env: process.env, override: store.get("linuxFrameless") }).frameless;
 const DEFAULT_THEME_ACCENT = "#8E48FF";
 const THEME_ACCENT_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
@@ -170,7 +180,9 @@ function currentThemeAccent() {
 // the window is frameless (titleBarStyle:"hidden") and the dashboard's own
 // 42px header doubles as the title bar: an injected drag region makes it
 // draggable and the native traffic lights are inset into it (see
-// positionTrafficLights).
+// positionTrafficLights). On Linux the window is frameless (frame:false) on
+// desktops that prefer client-side decorations — same injected drag region,
+// no native controls (see linux-frame.js).
 
 const { validateRemoteSettings } = require("./validation");
 const { attachContextMenu } = require("./context-menu");
@@ -1525,13 +1537,15 @@ function setupWindowContents(win, backendUrl) {
   view.webContents.on("page-title-updated", (e) => { e.preventDefault(); applyTitle(); });
 
   view.webContents.on("did-finish-load", () => {
-    // macOS + Windows + Linux (non-native-frame): the frameless window needs
-    // an injected drag region so the dashboard header can move the window.
-    // On macOS titleBarStyle:"hidden" makes the whole window frameless; on
-    // Windows titleBarOverlay provides caption controls but no drag area.
+    // Frameless platforms need an injected drag region so the dashboard
+    // header can move the window. On macOS titleBarStyle:"hidden" makes the
+    // whole window frameless; on Windows titleBarOverlay provides caption
+    // controls but no drag area; on Linux frame:false (when the desktop
+    // environment prefers client-side decorations) removes the WM-provided
+    // drag surface entirely, so without this bar the window is undraggable.
     // The drag bar is pointer-events:none so clicks pass through to the SPA;
     // interactive controls are marked no-drag so they remain clickable.
-    if (IS_MAC || IS_WIN) {
+    if (IS_MAC || IS_WIN || LINUX_FRAMELESS) {
       view.webContents.insertCSS(`
         #electron-drag-bar {
           position: fixed;
@@ -1666,7 +1680,9 @@ function createWindow() {
   // macOS: titleBarStyle:"hidden" + native traffic lights inset into it.
   // Windows: titleBarStyle:"hidden" + titleBarOverlay puts native caption
   //   controls (minimize/maximize/close) in an overlay strip synced to theme.
-  // Linux: Electron ignores titleBarStyle, so it keeps the native frame.
+  // Linux: frame:false on desktops that expect client-side decorations,
+  //   native frame elsewhere (see linux-frame.js). titleBarStyle is ignored
+  //   by Electron on Linux, so the explicit frame flag is the mechanism.
   if (IS_MAC) opts.titleBarStyle = "hidden";
   if (IS_WIN) {
     opts.titleBarStyle = "hidden";
@@ -1676,6 +1692,7 @@ function createWindow() {
       height: 42,
     };
   }
+  if (LINUX_FRAMELESS) opts.frame = false;
   // Window + taskbar icon (Windows only): running unpackaged (`electron .`)
   // otherwise shows the default Electron icon. macOS takes its icon from the
   // .app bundle and Linux from the .desktop/AppImage, so leave those untouched.
@@ -2585,7 +2602,7 @@ async function openNewConnectionWindow() {
     };
     // Same platform-conditional chrome as the main window (see createWindow):
     // frameless + inset traffic lights on macOS, titleBarOverlay on Windows,
-    // native frame elsewhere (Linux).
+    // frame:false on CSD-preferring Linux desktops, native frame elsewhere.
     if (IS_MAC) connOpts.titleBarStyle = "hidden";
     if (IS_WIN) {
       connOpts.titleBarStyle = "hidden";
@@ -2595,6 +2612,7 @@ async function openNewConnectionWindow() {
         height: 42,
       };
     }
+    if (LINUX_FRAMELESS) connOpts.frame = false;
     if (IS_MAC) connOpts.trafficLightPosition = trafficLightPositionForZoom(1);
     const connWin = new BaseWindow(connOpts);
 
