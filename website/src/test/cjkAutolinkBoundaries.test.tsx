@@ -264,6 +264,215 @@ describe('fixCjkAutolinkBoundaries — refuses to cut without evidence', () => {
   })
 })
 
+describe('fixCjkAutolinkBoundaries — swallowed emphasis delimiter', () => {
+  it('handles the reported case — a bold-wrapped URL followed by a CJK paren', () => {
+    const src = '已建好：**https://example.com/reviews/2137**（revision 1）'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(
+      '已建好：**<https://example.com/reviews/2137>**（revision 1）',
+    )
+  })
+
+  // CommonMark consumes delimiter CHARACTERS, not runs. These four pin that: the
+  // first would be cut by run-scoring, and the second is what a blanket
+  // "odd-length run is inconclusive" rule would wrongly refuse.
+  it('sees a lone `*` eat one half of the `**`, leaving no strong opener', () => {
+    const src = '**foo* https://example.com/a**（x）'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  it('still acts on a bold-italic URL, whose opener run is three characters', () => {
+    const src = '***https://example.com/a***（x）'
+    expect(fixCjkAutolinkBoundaries(src)).toBe('***<https://example.com/a>***（x）')
+  })
+
+  it('is undisturbed by a lone `*` that prose uses literally', () => {
+    const src = '2 * 3 = 6 见 https://example.com/a**（x）'
+    // Nothing to cut: no opener at all, so the lone `*` must not manufacture one.
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  it('counts a closed pair as closed and the next opener as open', () => {
+    const src = '**b** 然后 **https://example.com/a**（x）'
+    expect(fixCjkAutolinkBoundaries(src)).toBe('**b** 然后 **<https://example.com/a>**（x）')
+  })
+
+  it('refuses when a prefix run could be either an opener or a closer', () => {
+    // `a**b` is both left- and right-flanking, so counting it either way can be
+    // wrong. The whole line is inconclusive rather than guessed at.
+    const src = 'a**b 见 https://example.com/x**（y）'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  // cases pin PARITY and POSITION rather than the mere presence of a backslash —
+  // treating any backslash as disqualifying would refuse the last two, which carry
+  // real delimiters.
+  it('does not read an escaped `\\**` as an opener', () => {
+    const src = '\\**See https://example.com/a**（x）'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  it('does not read an escaped `\\**` inside the run as a closer', () => {
+    const src = '**See https://example.com/a\\**（x）'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  it('still acts when the BACKSLASH is what was escaped, leaving `**` intact', () => {
+    const src = '\\\\**See https://example.com/a**（x）'
+    expect(fixCjkAutolinkBoundaries(src)).toBe('\\\\**See <https://example.com/a>**（x）')
+  })
+
+  it('still acts on the real `**` that follows an escaped `*`', () => {
+    const src = '\\***See https://example.com/a**（x）'
+    expect(fixCjkAutolinkBoundaries(src)).toBe('\\***See <https://example.com/a>**（x）')
+  })
+
+  it('refuses an all-ASCII paragraph — the rule needs positive evidence', () => {
+    // The same failure happens in ASCII prose, but `(` after the delimiter is
+    // exactly what a query string looks like (`?q=foo**-bar`), so there is nothing
+    // to tell the two apart. Fullwidth punctuation is the evidence this pass
+    // requires; an ASCII mark is not, which is why the pass carries `Cjk` in its
+    // name and leaves this shape alone.
+    const src = '**https://example.com/pull/2137**(revision 1)'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  it('cuts on a fullwidth comma too, not just a bracket', () => {
+    expect(fixCjkAutolinkBoundaries('**https://example.com/pr/1**，已合并')).toBe(
+      '**<https://example.com/pr/1>**，已合并',
+    )
+  })
+
+  it('refuses when an IDEOGRAPH follows the delimiter, not punctuation', () => {
+    // `已` is legal mid-path, so it is not evidence the URL ended — an earlier
+    // revision of this rule accepted any non-ASCII character and truncated
+    // `?q=a**中文`. The cost of the narrower class is that this shape, which really
+    // is the same bug, goes unfixed; the shape the rule is for is `**url**（…`.
+    const src = '**https://example.com/pr/1**已合并'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  it('cuts on a `__` delimiter too', () => {
+    expect(fixCjkAutolinkBoundaries('见 __https://example.com/a__（x）')).toBe(
+      '见 __<https://example.com/a>__（x）',
+    )
+  })
+
+  it('refuses when every opener in the prefix is already closed', () => {
+    // `**注意**` is balanced, so the `**` inside the URL has nothing to close and
+    // is plausibly part of the URL itself.
+    const src = '**注意** 见 https://example.com/a**b，然后'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  it('refuses when nothing before the URL opened an emphasis', () => {
+    const src = 'https://example.com/a**b，然后'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  it('refuses on an INTRAWORD `__`, which GFM renders literally', () => {
+    // `report__final` cannot open emphasis (CommonMark forbids intraword `_`), so
+    // a textual parity count would see one `__` and truncate a correct link. Both
+    // halves of a filename with a double underscore are a real pattern, and so are
+    // URLs carrying `__` (path segments, `__hstc`-style tracker params).
+    for (const src of [
+      'the file report__final.pdf, see https://drive.example.com/report__final.pdf',
+      'foo__bar；见 https://example.com/a__b，然后',
+    ]) {
+      expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+    }
+  })
+
+  it('refuses a `**` inside a QUERY STRING, whatever follows it', () => {
+    // `?q=foo**-bar` puts a word character before the delimiter and punctuation
+    // after it — character-for-character the shape of a real closer before
+    // punctuation. Flanking cannot separate them; only the fullwidth-punctuation
+    // requirement can, and `-` is ASCII. The third case is the same defect with an
+    // ideograph after the delimiter, which "any non-ASCII" would have accepted.
+    for (const src of [
+      '**See https://example.com/search?q=foo**-bar for details**',
+      '**https://example.com/?q=foo**-bar**more**',
+      '**See https://example.com/search?q=a**中文 for details**',
+      '**See https://example.com/search?q=a**中文',
+    ]) {
+      expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+    }
+  })
+
+  it('refuses when the prefix opener is real but the CANDIDATE closes nothing', () => {
+    // Checking only the opener is not enough. Both of these open a genuine
+    // delimiter and then hit one sitting INSIDE the URL path; cutting there would
+    // truncate a correct link, and the emphasis would stay open regardless.
+    for (const src of [
+      '__See https://example.com/a__b for details__',
+      '**Note: https://example.com/a**b',
+    ]) {
+      expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+    }
+  })
+
+  it('refuses when an ASCII word character follows the closing delimiter', () => {
+    // `…/2137**and` is indistinguishable from a path containing `**`, and the
+    // emphasis could not re-close there anyway (`>` before a letter is not
+    // right-flanking).
+    const src = 'Filed **https://example.com/pull/2137**and merged it'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  it('refuses when the pending opener is a NON-FLANKING run a parity count would accept', () => {
+    // This is what separates `hasPendingStrongOpener` from a textual count: the `**`
+    // in `a ** b` has whitespace on both sides, so GFM renders it literally and no
+    // emphasis is open when the URL starts — but a count sees one `**` and calls it
+    // pending. The candidate here IS followed by fullwidth punctuation, so the
+    // opener check is the only thing that refuses it.
+    const src = 'a ** b 见 https://example.com/x**（y）'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  it('refuses when nothing at all opened an emphasis before the URL', () => {
+    // No `**` in the prefix, and `**（` inside the path. Without the opener check
+    // this would be cut on the fullwidth mark alone.
+    const src = '见 https://example.com/a**（x）'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  it('refuses on a NON-FLANKING `**`, which opens nothing', () => {
+    // Whitespace on both sides makes the run neither left- nor right-flanking, so
+    // it is literal text and there is no opener for the URL's `**` to close.
+    const src = 'a ** b, see https://example.com/c**d, then'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  it('refuses when the prefix run could be either an opener or a closer', () => {
+    // `a**b` is both left- and right-flanking, so whether an emphasis is open at
+    // the URL is genuinely undetermined — the conservative reading wins.
+    const src = 'a**b see https://example.com/c**d, then'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  it('leaves a trailing delimiter alone — GFM keeps it out of the run', () => {
+    // Both render correctly today. GFM trims a trailing `*` off the autolink
+    // literal, so the delimiter is never inside the node's source and there is
+    // nothing here to cut.
+    for (const src of ['**https://example.com/a**', '**https://example.com/a** 已合并']) {
+      expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+    }
+  })
+
+  it('does not let a `**` from a non-prose region supply the opener', () => {
+    const src = '`**` https://example.com/a**b，然后'
+    expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+  })
+
+  it('treats a SINGLE `*` or `_` as too weak to act on', () => {
+    // Both are legal in a URL and common in query strings, so an unpaired one
+    // before the URL is not evidence — same reason `*` is excluded from the
+    // markdown-active class.
+    for (const src of ['*https://example.com/a*b，然后', '_https://example.com/a_b，然后']) {
+      expect(fixCjkAutolinkBoundaries(src)).toBe(src)
+    }
+  })
+})
+
 describe('fixCjkAutolinkBoundaries — pipeline order', () => {
   it('sees the code block that fixCodeFences creates from a glued fence opener', () => {
     // `text```sh` is paragraph text until fixCodeFences inserts the blank line
@@ -300,5 +509,17 @@ describe('fixCjkAutolinkBoundaries — rendered output', () => {  const renderMd
     expect(container.querySelector('a')?.getAttribute('href')).toBe(
       'https://ja.wikipedia.org/wiki/%E3%83%A2%E3%83%BC%E3%83%8B%E3%83%B3%E3%82%B0%E5%A8%98%E3%80%82',
     )
+  })
+
+  it('gives the bold its delimiter back instead of two literal asterisks', () => {
+    const src = '已建好：**https://example.com/reviews/2137**（revision 1，目前是 draft）'
+    const { container } = renderMd(src)
+    const a = container.querySelector('a')
+    expect(a?.getAttribute('href')).toBe('https://example.com/reviews/2137')
+    // The delimiter is a delimiter again: it closes the bold around the link…
+    expect(container.querySelector('strong a')).not.toBeNull()
+    // …instead of surviving as text, which is the tell-tale of the bug.
+    expect(container.textContent).not.toContain('*')
+    expect(container.textContent).toContain('（revision 1，目前是 draft）')
   })
 })
