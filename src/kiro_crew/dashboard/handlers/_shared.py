@@ -82,6 +82,32 @@ async def read_bounded_json(
     return body, None
 
 
+def admits_registry(kind: str, name: str, api_base: str) -> bool:
+    """Whether the composed platform admits an external discovery registry.
+
+    The single call point for the ``discovery`` seam, so both catalogs (skills and
+    MCP servers) ask the question the same way instead of each re-deriving the
+    fail-closed idiom — the reason ``safe_context_call`` is centralized is that a
+    hand-rolled ``except Exception`` at a call site silently swallows
+    ``PlatformCompositionError``.
+
+    Denies on a transient adapter failure rather than admitting. This is a
+    containment control, and the only way to reach the fallback is for a COMPOSED
+    policy to raise — a managed deployment whose intent was to restrict
+    something — so admitting the public registry there would hand back the exact
+    egress the operator disabled. The public default cannot raise, so an ordinary
+    install is unaffected, and a ``PlatformCompositionError`` still propagates per
+    the CPP fail-closed invariant.
+    """
+    from kiro_crew.platform.context import current_context, safe_context_call
+
+    return safe_context_call(
+        lambda: current_context().discovery.admits_registry(kind, name, api_base),
+        fallback=False,
+        log_message=f"discovery policy check failed for {kind} registry {name!r}; denying",
+    )
+
+
 def _capability_manager() -> "CapabilityManager":
     """The edition's external capability manager (CPP seam).
 

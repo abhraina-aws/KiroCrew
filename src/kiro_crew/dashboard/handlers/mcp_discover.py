@@ -45,12 +45,19 @@ _DETAIL_TIMEOUT_SECS = 15.0
 def _build_registry() -> ProviderRegistry:
     """Build the provider registry with all available providers.
 
-    The official registry is always registered (public API, no auth).
-    The edition capability provider is registered only when the CPP
-    capability manager reports available — external installs never see it.
+    The official registry is registered unless the composed ``discovery`` policy
+    refuses it — the seam a managed deployment uses to restrict installable
+    servers to its own registry. The edition capability provider is registered
+    only when the CPP capability manager reports available — external installs
+    never see it.
     """
     registry = ProviderRegistry()
-    registry.register(OfficialRegistryProvider())
+
+    from kiro_crew.dashboard.handlers._shared import admits_registry
+
+    official = OfficialRegistryProvider()
+    if admits_registry("mcp", official.name, official.api_base):
+        registry.register(official)
 
     # The edition capability manager (CPP seam) registers as a second
     # provider only when this edition actually installs one — the public

@@ -4,6 +4,23 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **A managed deployment can now restrict where installable content comes from.**
+  Two catalogs fetch from the public internet and then offer to install what they
+  return — skill discovery (skills.sh) and MCP server discovery (the official MCP
+  registry) — and both hardcoded their public provider at registration time. There
+  was no way to say "source installable code only from our own registry" without
+  patching the core, which is a hard blocker for any deployment where third-party
+  code has to be reviewed before it can be installed. A new `discovery` platform
+  slot (`DiscoveryPolicy.admits_registry(kind, name, api_base)`) is consulted in
+  both `_build_registry()` functions; a refused provider is never registered, so
+  it is absent from the provider list rather than failing per request and there is
+  no later install path left to gate. The decision takes the provider's base URL
+  as well as its name, because the name is a self-chosen label while the URL
+  determines where bytes actually come from — so an allowlist stops admitting a
+  provider that later repoints at a different host instead of letting it inherit
+  trust from its name. The public default admits everything, so an ordinary
+  install is unchanged.
+
 - **A lesson from a previous embedding-model generation could no longer get
   silently deleted or offered as a false contradiction.** `write_lesson`'s
   semantic dedup and `find_contradiction_candidates` compared raw embeddings

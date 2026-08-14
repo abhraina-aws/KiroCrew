@@ -658,6 +658,39 @@ class CapabilityManager(Protocol):
 # ── install / structural extension points ──
 
 
+class DiscoveryPolicy(Protocol):
+    """Which external registries may be queried for installable content.
+
+    Two catalogs reach the public internet on a user's behalf and then offer to
+    INSTALL what they return: skill discovery (``skill_providers/``, backed by
+    skills.sh) and MCP server discovery (``mcp_providers/``, backed by the
+    official MCP registry). Both hardcoded their public provider at registration
+    time, so a managed deployment had no way to say "source installable content
+    only from our own registry" without patching the core.
+
+    That is the gap this closes. A denied provider is never registered, so it is
+    ABSENT rather than failing per request: it does not appear in the provider
+    list, the dashboard offers no rows from it, and there is no later install path
+    left to gate.
+
+    Decided on ``api_base`` as well as ``name`` deliberately. The name is a label
+    a provider chooses for itself, while the base URL determines where bytes
+    actually come from — pinning an allowlist to the URL means a provider that
+    later repoints at a different host stops being admitted, instead of silently
+    inheriting trust from its name.
+
+    The public default admits everything, so open-source behaviour is unchanged.
+    """
+
+    def admits_registry(self, kind: str, name: str, api_base: str) -> bool:
+        """Whether the *kind* registry *name* serving ``api_base`` may be queried.
+
+        *kind* is the catalog the provider belongs to — ``"skill"`` or ``"mcp"``.
+        Returning ``False`` means the provider is never registered.
+        """
+        ...
+
+
 class AppRegistryPolicy(Protocol):
     """Trusted git hosts + clone-sandbox-mode decision for the app registry.
 

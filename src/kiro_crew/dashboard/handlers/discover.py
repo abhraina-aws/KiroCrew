@@ -82,11 +82,23 @@ def _build_registry() -> ProviderRegistry:
 
     Called once at handler setup time. Providers check their own
     availability dynamically (config flags, auth state, etc.).
+
+    A provider the composed ``discovery`` policy refuses is never registered, so a
+    managed deployment that must source installable content only from its own
+    registry sees no rows from it and has no install path left to gate. The public
+    default admits everything.
     """
     registry = ProviderRegistry()
 
-    # skills.sh — always registered, enabled by default (public API, no auth)
-    registry.register(SkillsShProvider(SkillsShConfig(enabled=True)))
+    # skills.sh — public API, no auth. Registered unless the discovery policy
+    # refuses it. The provider is asked for its OWN name and base URL rather than
+    # passing literals, so an allowlist is written against the same identity the
+    # provider reports everywhere else.
+    from kiro_crew.dashboard.handlers._shared import admits_registry
+
+    skillsh = SkillsShProvider(SkillsShConfig(enabled=True))
+    if admits_registry("skill", skillsh.name, skillsh.api_base):
+        registry.register(skillsh)
 
     # PromptFarm — registered but availability depends on config. The existing
     # /api/skills/-/remote endpoint remains for backward compat; the discover

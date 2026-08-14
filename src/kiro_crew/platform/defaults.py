@@ -295,6 +295,18 @@ class DefaultCapabilityManager:
         return CapabilityResult(ok=False, message="capability manager not available")
 
 
+class DefaultDiscoveryPolicy:
+    """Admits every discovery registry — today's open-source behaviour.
+
+    The public build queries skills.sh and the official MCP registry, so the
+    default must stay permissive or an ordinary install would lose both browsers.
+    A managed edition overrides this to allowlist its own registry instead.
+    """
+
+    def admits_registry(self, kind: str, name: str, api_base: str) -> bool:
+        return True
+
+
 class DefaultAppRegistryPolicy:
     """Today's public trusted-host set + clone-sandbox-mode decision.
 

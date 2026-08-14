@@ -48,6 +48,7 @@ boot holding the chosen adapter for every extension point, plus three carriers:
 | `agent_catalog` | adapter | `DefaultAgentCatalogProvider` (`builtin_agents()` → `[]`) | edition agent-catalog rows |
 | `prompt_sources` | adapter | `DefaultPromptSourceProvider` (`prompt_source_roots()` → `[]`) | edition prompt/SOP roots |
 | `capability_manager` | adapter | `DefaultCapabilityManager` (`available()` → `False`) | operations-based external package manager: MCP servers, skills, agent packages, and client plugins |
+| `discovery` | adapter | `DefaultDiscoveryPolicy` (`admits_registry()` → `True`) | allowlist installable content to an internal registry |
 | `registry` | adapter | `DefaultAppRegistryPolicy` (public-forge baseline) | internal git hosts |
 | `apps_loader` | adapter | `DefaultAppsLoader` (OSS builtins) | internal app sources (code-reviewer; team_manager/mimir follow-on) |
 | `package_manager` | adapter | **RESERVED** — `DefaultPackageManager`; installs are inline in `cli_doctor.py` (use `CapabilityManager`) | — (slot inert) |
@@ -57,6 +58,21 @@ boot holding the chosen adapter for every extension point, plus three carriers:
 | `dashboard` | adapter | `DefaultDashboardContributor` (no routes/services, no login handler) | secretary/taskkeeper routes + enterprise SSO PTY login |
 | `jail` | adapter | `DefaultJailProvider` (no-op, never jails) | enterprise process isolation |
 | `feature_apps` | tuple | **RESERVED** — `()`; apps register via `apps_loader` (provenance record only) | — (slot inert) |
+
+> `discovery` note — the two catalogs that fetch installable content from the
+> public internet (skill discovery via skills.sh, MCP server discovery via the
+> official registry) used to hardcode their provider at registration time, so a
+> managed deployment could not restrict where installable code came from without
+> patching the core. `DiscoveryPolicy.admits_registry(kind, name, api_base)` is
+> consulted in both `_build_registry()` functions, and a refused provider is never
+> registered — ABSENT rather than failing per request, so no rows appear and there
+> is no later install path left to gate. The decision takes `api_base` as well as
+> `name` because the name is a self-chosen label while the URL is what determines
+> where bytes come from; an allowlist pinned to the URL stops admitting a provider
+> that repoints at a different host. `_shared.py::admits_registry` is the single
+> call point and denies on a composed-adapter error (reaching that fallback means
+> an operator intended to restrict something), while
+> `PlatformCompositionError` still propagates.
 
 > `registry` note — the public `DefaultAppRegistryPolicy` encodes the
 > public-forge baseline and ships no internal-host set. The enterprise companion

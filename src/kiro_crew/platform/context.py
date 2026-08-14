@@ -33,6 +33,7 @@ if TYPE_CHECKING:  # avoid import cycles — config.loader imports heavy modules
         CapabilityManager,
         CredentialPolicy,
         DashboardContributor,
+        DiscoveryPolicy,
         EmbeddingSource,
         FeatureApp,
         IdentityProvider,
@@ -287,6 +288,7 @@ class PlatformContext:
     capability_manager: "CapabilityManager"
 
     # ── install / structural extension points ──
+    discovery: "DiscoveryPolicy"
     registry: "AppRegistryPolicy"
     apps_loader: "AppsLoader"
     package_manager: "PackageManager"  # [RESERVED] — see RESERVED_SLOTS
