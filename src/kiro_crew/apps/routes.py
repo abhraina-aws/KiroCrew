@@ -89,6 +89,7 @@ from kiro_crew.atomic_write import atomic_write
 from kiro_crew.config.loader import KiroCrewConfig, config_dir, config_path
 from kiro_crew.cron import CronStoreBusy
 from kiro_crew.executors import subprocess_executor
+from kiro_crew.publish_governance import DEPLOY_WEB_PROVIDER_ID, publish_denied_reason
 from kiro_crew.sandbox import cgroup_scope_argv, create_subprocess_limited, wrap_argv
 from kiro_crew.sel import sel
 
@@ -308,13 +309,31 @@ async def handle_publish_providers(request: web.Request) -> web.Response:
     Returns enabled apps' publish providers plus the core deploy provider (folded
     from the former deploy_web app), each with a ``configured`` flag. Built-in
     providers (the internal registry) are registered frontend-side and are not returned here.
+
+    The core deploy provider is omitted when the publish-governance chokepoint
+    denies its destination id, so an operator who has closed the public-web path
+    never sees the button. That is presentation only — ``/api/deploy/deploy``
+    consults the same chokepoint itself, because a filtered list is not a control.
     """
     # Both the apps-dir walk (list_apps) and the per-provider configured-state
     # probe (_provider_is_configured reads each app's persisted config file)
     # touch disk, so the whole collection runs off the loop — same shape as the
     # deploy registry read below.
     providers = await asyncio.to_thread(lambda: collect_publish_providers(list_apps()))
-    # Core deploy provider (always present, regardless of any app install state)
+    # Core deploy provider: present unless the operator's policy or config has
+    # closed this destination (governance ceiling ∩ publish.allowed_destinations).
+    # A PlatformCompositionError propagates — fail-closed CPP, same as every
+    # other publish surface.
+    deploy_denied = await asyncio.to_thread(
+        lambda: publish_denied_reason(request, DEPLOY_WEB_PROVIDER_ID)
+    )
+    if deploy_denied:
+        logger.info(
+            "publish provider %r omitted from the registry: %s",
+            DEPLOY_WEB_PROVIDER_ID,
+            deploy_denied,
+        )
+        return web.json_response({"providers": providers})
     try:
         from kiro_crew.deploy import profiles as _deploy_profiles
 
@@ -325,7 +344,7 @@ async def handle_publish_providers(request: web.Request) -> web.Response:
         configured = False
     providers.append(
         {
-            "id": "deploy-web-aws",
+            "id": DEPLOY_WEB_PROVIDER_ID,
             "label": "Publish to public web (your AWS)",
             "icon": "Globe",
             "endpoint": "/api/deploy/deploy",

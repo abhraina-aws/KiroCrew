@@ -13,6 +13,7 @@ import { useNavigate } from 'react-router-dom'
 import { AlertCircle, AlertTriangle, Check, ExternalLink, Globe, Settings, Upload, X } from 'lucide-react'
 import { api, type AppPublishProvider } from '../api/client'
 import { Card, Btn } from './ui'
+import PublicPublishAckModal from './PublicPublishAckModal'
 import SimpleSelect from './SimpleSelect'
 import type { Artifact } from '../types'
 import { safeHttpUrl } from '../lib/safeUrl'
@@ -74,6 +75,10 @@ export function PublishHub({
   const [scanBlocked, setScanBlocked] = useState<{ findings: string; count: number; credential?: boolean } | null>(null)
   const [result, setResult] = useState<{ url?: string; error?: string } | null>(null)
   const [busy, setBusy] = useState(false)
+  // Non-null while the blocking public-exposure acknowledgment is on screen.
+  // `overrideScan` remembers WHICH commit path opened it, so acknowledging
+  // resumes that path instead of collapsing both into a plain publish.
+  const [ack, setAck] = useState<{ overrideScan: boolean } | null>(null)
   const [ttlHours, setTtlHours] = useState<string>('Persistent (no expiry)')
   const selectedTtlHours = () => (ttlHours === '72 hours (requires reaper)' ? 72 : 0)
   // A TTL change invalidates an existing preview — the previewed TTL
@@ -236,7 +241,7 @@ export function PublishHub({
             <span>{i18nT('components.publishHub.public_exposure_warning')}</span>
           </div>
           <div className="flex gap-2">
-            <Btn primary onClick={() => confirmPublish()} disabled={busy}>
+            <Btn primary onClick={() => setAck({ overrideScan: false })} disabled={busy}>
               {busy ? i18nT('components.publishHub.publishing_2') : <><Upload size={12} /> {i18nT('components.publishHub.confirm_publish')}</>}
             </Btn>
             <Btn onClick={() => { setPreview(null); setSelectedId('') }}>{i18nT('components.publishHub.back')}</Btn>
@@ -272,7 +277,7 @@ export function PublishHub({
                 <span>{i18nT('components.publishHub.public_exposure_warning')}</span>
               </div>
               <div className="flex gap-2">
-                <Btn danger onClick={() => { setScanBlocked(null); confirmPublish(true) }} disabled={busy}>
+                <Btn danger onClick={() => setAck({ overrideScan: true })} disabled={busy}>
                   {busy ? i18nT('components.publishHub.publishing_2') : i18nT('components.publishHub.override_publish_anyway')}
                 </Btn>
                 <Btn onClick={() => { setScanBlocked(null); setSelectedId('') }}>{i18nT('components.publishHub.cancel')}</Btn>
@@ -327,6 +332,22 @@ export function PublishHub({
           <Btn onClick={() => { setResult(null); setPreview(null); setScanBlocked(null); setSelectedId(''); onClose?.() }}>{i18nT('components.publishHub.done')}</Btn>
         </div>
       )}
+
+      {/* Blocking public-exposure acknowledgment — the last thing between a
+          human and a world-readable URL, for BOTH commit paths. */}
+      <PublicPublishAckModal
+        open={!!ack}
+        target={artifact.slug}
+        ttlHours={selectedTtlHours()}
+        busy={busy}
+        onCancel={() => setAck(null)}
+        onConfirm={() => {
+          const overrideScan = !!ack?.overrideScan
+          setAck(null)
+          if (overrideScan) setScanBlocked(null)
+          void confirmPublish(overrideScan)
+        }}
+      />
     </Card>
   )
 }
