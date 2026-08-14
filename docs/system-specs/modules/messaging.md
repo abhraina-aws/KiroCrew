@@ -514,6 +514,93 @@ resolution: ACP request IDs are reusable across provider/gateway restarts, so a
 stale button without the matching nonce fails closed. The decision window
 denies by default on timeout and retires the nonce with it.
 
+### Resume-binding expectations (`discord/resume_expectation.py`)
+
+An inbound resume binding (`!sessions` here, or a dashboard connect writing the
+inbound marker straight to the session map) lives on the BOUND SESSION's
+`session_map.json` entry, so anything destroying that entry — an overflow recycle, a
+restart prune, a dashboard mirror unlink — destroys the only evidence the conversation
+was ever attached: the resolver finds no owner and the conversation falls back to its
+own DM session. This record makes that reportable, not silent.
+
+**Store.** `$KIROCREW_HOME/trust/discord_resume_expectations.json`, keyed by channel
+id, each row `{key, title, version}`, reloaded from disk so a restart can still name
+what was lost. Under `trust/` and NOT the data-home root, because the root is reachable
+by agent file tools: an injected agent could delete this record and the session-map
+entry together and leave nothing to detect, whereas deleting the entry alone yields a
+refusal. Written only when a conversation attaches, rebinds or detaches, and locked to
+its owner (`restrict_to_owner`, since a mode is a no-op on Windows) in a `0o700`
+directory, because a session title is conversation text. The public surface is entirely
+`async`; every filesystem step (`config_dir()` included) runs in a worker thread, and an
+`asyncio.Lock` serializes read-modify-write, never held across Discord I/O.
+
+**Refuse before route.** `DiscordSessionResume.route` returns one
+`RoutingDecision` per inbound message, carrying either the session key to run in or
+the refusal that stops it running at all. It is computed before every command that
+targets a session (`!compact`, `!stop`, `!link`, plain turns); `!new` and `!unlink` are
+the user deliberately leaving, so they clear the record AND release every binding at the
+channel, ambiguous or not. `!sessions` and `!help` are exempt so recovery stays
+reachable. The turn path and every session-targeting command take
+`resumed_key` from that one decision and never re-resolve; `route`'s docstring carries
+the read order and the revalidate rule. The tool-approval interaction is deliberately outside this: it
+dispatches no turn, and its nonce-keyed lookup already fails visibly.
+
+Three states run the message: no owner and no record, one owner and no record
+(bootstrap, then run there), one owner matching the record. Four refuse: no owner
+with a record (link destroyed — refuse once, then retire it); one owner DIFFERENT
+from the record (the link moved — name it and adopt only after delivery, since
+re-pointing silently answers from a conversation the user was never told about);
+two owners with or without a record; and a resolution that kept changing.
+
+**Versioned acknowledgement.** Every record carries a monotonic per-channel `version`
+and a refusal quotes the one it was computed from. The settle after a confirmed send is
+compare-and-set — retire or replace only while the record is still at that version, so a
+picker bind or dashboard connect that landed mid-notice wins — and a failed send settles
+nothing, so the next message is refused again. The version cannot see a dashboard
+rebind, which changes the map without touching this store, so settlement also
+reconciles the live inbound owner the notice described, before its write and again
+after. A record cleared beside a newly-arrived owner is put back (put-if-absent under
+the store's lock, so a bind queued behind the clear is not overwritten by a restore of
+the retired key), and the next message reports that owner as a hotswap.
+
+**Persistence is fail-closed, in both directions.** A write that cannot be made
+durable raises, and in-memory state is published only after it succeeds. On the read
+side only an ABSENT file is empty: a permission error, invalid UTF-8, malformed JSON, a
+wrong-shaped row or a missing/unusable `version` raises rather than reporting "no
+records", which would read as "never attached" and route the turn natively. Either
+refuses the message, and a later one recovers once the file is readable. A
+pick records BEFORE it binds, so a failed write leaves nothing to roll back. `!unlink`
+and `!new` release the binding durably BEFORE clearing the record — the map write is
+debounced, and the reverse order left a crash window reading as one owner and no record
+— and release it even if the record cannot be cleared, costing one self-clearing notice.
+
+**The blast radius is gateway-wide, deliberately.** One file holds every channel's
+record, so a file this process cannot parse could be hiding an expectation for ANY
+channel. Refusal is gateway-wide while it is unreadable, not scoped to channels already
+seen: a cached set would, on the first message after a restart, treat an unknown channel
+as never-attached and route it natively. The file is never overwritten, quarantined or
+dropped to get moving again — that would discard other channels' records unread — so
+repair is an OPERATOR action and nothing self-heals.
+
+*Repair procedure.* Stop the gateway, copy
+`$KIROCREW_HOME/trust/discord_resume_expectations.json` aside, edit it back to the
+documented shape (`channel_id → {key, title, version}`, integer `version`) or restore
+the backup, restart. Never delete or truncate it — every channel's record lives there,
+so discarding them turns one visible refusal into silent misroutes elsewhere; `{}` is a
+legitimate repaired state when the bindings are gone.
+
+**One decision per message, and no message routes before it is told.** Deciding,
+sending the refusal and settling it are serialized per CHANNEL, and the settle waits
+until nobody is still queued behind the notice: a queued message was sent before that
+notice existed, so retiring the refusal for it would route it natively into a transcript
+the user never chose. It is refused too, and the last one out settles.
+
+**Lifecycle: this store is a shadow, not an authority.** It exists only because
+channel identity currently lives on session-map entries keyed by SESSION, leaving
+the one fact needed to detect a lost binding — what this CHANNEL was attached to —
+nowhere else to live. If a channel-keyed binding authority lands, delete this state
+machine and migrate its rows rather than keeping two stores of one fact.
+
 ## Discord settings API
 
 - `GET /api/discord/config` — masked `bot_token_preview` + `bot_token_set`,

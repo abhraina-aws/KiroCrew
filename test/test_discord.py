@@ -197,6 +197,9 @@ class FakeProvider:
 
 
 class FakeSessions:
+    def flush(self) -> None:  # in-memory double: already durable
+        pass
+
     def __init__(self, raise_on_get: bool = False) -> None:
         self.released: list[str] = []
         self.acquired: list[str] = []
@@ -1741,25 +1744,34 @@ class TestDispatcher:
         ``batched_save`` writes on the way out even when the block raises, so a
         refusal raised AFTER the opt-out withdrawal would persist that withdrawal
         for a link that never happened — silently turning mirroring back on. The
-        claim is refused before it mutates anything, so it goes first.
+        claim is refused before it mutates anything, so it goes first. Two owners now
+        also make the routing decision refuse `!link` ahead of the handler; either
+        way nothing is persisted for a link that did not happen.
         """
         d, cli, sess = _dispatcher({"u1"})
         await d.handle_message(self._msg("!unlink"))
         self._occupy_ambiguously(sess)
         await d.handle_message(self._msg("!link"))
-        assert any("already linked here" in t for t, _ in cli.sent)
+        assert any("`!unlink`" in t for t, _ in cli.sent)
         assert sess.mirror_opt_outs == {_opt_out_key(d._session_key("u1"))}, (
             "a refused link must not withdraw the refusal"
         )
 
     @pytest.mark.asyncio
-    async def test_a_refused_bind_still_answers_the_turn(self) -> None:
-        # An uncaught raise on the turn path would drop the turn and answer the
-        # user nothing.
+    async def test_an_ambiguous_conversation_is_answered_but_not_processed(self) -> None:
+        """Two owners deny routing, so the turn must be refused — and answered.
+
+        Falling through to this conversation's own session would answer from a
+        session holding none of the context the user is looking at; an uncaught
+        raise here would answer nothing at all. So: a reply, and no turn.
+        """
         d, cli, sess = _dispatcher({"u1"})
         self._occupy_ambiguously(sess)
         await d.handle_message(self._msg("hello world"))
-        assert "Answer: hello world" in (cli.final_text() or "")
+        assert "Ambiguous link" in (cli.final_text() or "")
+        assert "Answer: hello world" not in (cli.final_text() or ""), (
+            "the message was processed while routing was denied"
+        )
         assert d._session_key("u1") not in sess.mirror_links
 
     @pytest.mark.asyncio
