@@ -5382,6 +5382,10 @@
       "url": "url",
       "will_add": "追加されます"
     },
+    "mcpStaleBanner": {
+      "live_sessions_keep_the_tools_they_started_with_r": "実行中のセッションは起動時のツールを保持します。新しい設定を読み込むにはセッションを再起動してください。",
+      "mcp_configuration_changed": "MCP 設定が変更されました"
+    },
     "messageErrorBoundary": {
       "hide_raw": "未処理を非表示",
       "message_failed_to_render": "メッセージのレンダリングに失敗しました",
@@ -8935,6 +8939,7 @@
         "globals": "グローバル",
         "kiro": "Kiro",
         "kirocrew": "Kiro Crew",
+        "last_probed": "最終プローブ",
         "mcp_servers_count": "MCP サーバー（{{count}}）",
         "name": "名前",
         "no_matching_servers": "一致するサーバーなし",
@@ -8949,11 +8954,13 @@
         "probe_mcp_servers": "MCP サーバーをプローブ",
         "servers_scope_tip": "Kiro Crew とインタラクティブ {{provider}}/Kiro グローバルの MCP サーバー。Kiro Crew バッジは Kiro Crew セッションで読み込まれるかを示します。グローバルバッジはインタラクティブ Kiro グローバルと共有されるかを示します。クリックしてトグルしてから適用。",
         "status": "ステータス",
+        "tool_list_read_from_the_package_s_declaration_th": "ツール一覧はパッケージ自身の宣言から読み取ったものです。サーバーを起動して動作確認はしていません。",
         "tools": "ツール",
         "tools_2": "ツール",
         "undo": "元に戻す",
         "uninstall": "アンインストール",
-        "unknown": "不明"
+        "unknown": "不明",
+        "unverified": "未検証"
       },
       "memoryGraphTab": {
         "all_count": "すべて（{{count}}）",

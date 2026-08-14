@@ -11,7 +11,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from collections.abc import MutableMapping
+from collections.abc import Iterable, MutableMapping
 from pathlib import Path
 
 from kiro_crew import platform_compat
@@ -506,6 +506,197 @@ def augmented_path(base_path: str = "") -> str:
     parts = extra + ([base_path] if base_path else [])
     parts.append(str(Path(sys.executable).parent))
     return os.pathsep.join(parts)
+
+
+def dedup_path(path: str) -> str:
+    """Drop repeated entries from a ``PATH`` string, keeping the first of each.
+
+    First-wins so precedence is preserved, and so :func:`spec_env_path` is
+    idempotent: feeding an already-expanded value back in contributes only
+    duplicates, which collapse to the same string.
+
+    Entries are compared through ``normcase(normpath(...))`` but emitted in
+    their original spelling. On Windows ``os.path`` IS ``ntpath``, so that
+    folds case and separator flavour together -- ``C:\\Tools`` and
+    ``C:/tools`` name one directory, and emitting both would put two spellings
+    of it on the child's PATH. Matches the normalization
+    :func:`node_bin_dirs` applies for the same reason. The original spelling is
+    kept rather than the normalized one so the value stays byte-comparable
+    against what a caller authored.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for entry in path.split(os.pathsep):
+        if not entry:
+            continue
+        key = os.path.normcase(os.path.normpath(entry))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(entry)
+    return os.pathsep.join(out)
+
+
+def _spec_path_entries(env_path: str) -> list[str]:
+    """The usable entries of a spec-authored ``PATH``, in order.
+
+    Drops anything not absolute, applying to caller-authored entries the rule
+    :func:`_validated_bin_dir` already applies to this module's own well-known
+    dirs: a relative entry is re-resolved against the CHILD's cwd, so it lets a
+    work-dir-relative executable shadow the configured command -- and a spec's
+    entries lead the emitted PATH, which is the strongest position to shadow
+    from. NUL is rejected for the same reason it is there: it cannot survive
+    ``execve``, so keeping it only converts a bad entry into a failed spawn.
+    """
+    out: list[str] = []
+    for entry in env_path.split(os.pathsep):
+        if not entry:
+            continue
+        if not os.path.isabs(entry) or "\0" in entry:
+            logger.debug("ignoring non-absolute MCP spec PATH entry: %r", entry)
+            continue
+        out.append(entry)
+    return out
+
+
+def spec_env_path(env_path: str) -> str:
+    """Expand an MCP spec's ``env.PATH`` into the PATH its child actually needs.
+
+    A spec's ``env`` is applied per key by whatever spawns the server, so
+    declaring ``PATH`` REPLACES the inherited one for that child instead of
+    extending it. This module's own backend spawn takes that shape
+    (``mcp_gateway.gatewayd`` builds its child env as ``dict(env)`` then
+    ``update(declared)``), and the pptx-maker engine already composes a
+    COMPLETE ``PATH`` into its spec's ``env`` for the same reason -- see
+    ``pptx_maker.backend.provision.mcp_tools_path``, whose docstring notes that
+    nothing the gateway does to its own subprocesses reaches a server the agent
+    CLI spawns.
+
+    So a spec that names one directory to add -- a Node version manager's shim
+    dir, say -- hands the server a PATH holding *only* that directory, and
+    anything the server resolves at runtime disappears. The failure is silent
+    and asymmetric: a launcher that is itself a wrapper (``exec
+    <sibling-binary> ...``) dies with "not found" for a binary that is plainly
+    installed, while the dashboard probe -- which merged rather than replaced --
+    reports the same server healthy. Nothing in the UI can distinguish that from
+    a working server.
+
+    Expanding the value before it is written into the agent config closes the
+    gap: the child is launched with the PATH the probe validates and the command
+    resolves against, so "probes healthy" and "works in a session" cannot
+    diverge. The spec's own entries stay FIRST, ahead of both the inherited PATH
+    and the augmentation, so a spec that pins a toolchain still wins.
+
+    Idempotent: re-expanding an already-expanded value contributes only
+    duplicates, which :func:`dedup_path` collapses. That matters because the
+    agent config is rewritten on every gateway start.
+
+    The result is a SNAPSHOT of the rebuild-time environment, so it names this
+    host's directories (the mise data dir, each installed Node version's bin,
+    the running interpreter's bin) and two starts can legitimately differ if the
+    host's own PATH or installed toolchains changed. That is the cost of the
+    only lever available for a child this process does not spawn: the config
+    handed to the spawner. A config carrying an expanded value is therefore not
+    portable to another machine, and the emitted PATH is long enough that
+    reading it by eye is unpleasant.
+
+    A non-string value degrades to no override rather than raising. This runs
+    once per candidate for every server on every rebuild, so a single
+    malformed ``env.PATH`` in any config file would otherwise turn one bad
+    entry into a failed gateway start.
+
+    Only for a spec that already declares ``env.PATH``: one that does not
+    inherits a usable PATH untouched, so it is left alone and keeps a config
+    that stays portable.
+    """
+    if not isinstance(env_path, str):
+        logger.debug("ignoring non-string MCP spec PATH: %s", type(env_path).__name__)
+        env_path = ""
+    parts = [*_spec_path_entries(env_path), augmented_path(os.environ.get("PATH", ""))]
+    return dedup_path(os.pathsep.join(filter(None, parts)))
+
+
+# Env keys a spec's declared ``env`` must never set on a spawned process.
+# These are DYNAMIC LOADER channels: they take effect in the LAUNCHER itself —
+# every ELF/Mach-O binary in the spawn chain, the sandbox wrapper (bwrap,
+# sandbox-exec) included — so a hostile MCP config entry carrying one runs
+# arbitrary code OUTSIDE the isolation that exists precisely because the entry
+# is untrusted. Prefix-matched (LD_PRELOAD, LD_LIBRARY_PATH, LD_AUDIT, every
+# DYLD_ knob), case-insensitively (Windows env is case-insensitive).
+#
+# Python variables (PYTHONPATH, PYTHONSTARTUP, PYTHONHOME) are deliberately
+# NOT here: the launcher is never a Python interpreter, so they first take
+# effect inside the server process — which is already inside the sandbox and
+# already executes spec-author-controlled code by definition, so they grant
+# nothing new. Denying them would also re-open the probe/session divergence
+# this whole change closes, in mirror image: the emitted config hands a
+# declared PYTHONPATH to kiro-cli sessions untouched (a legitimate way to
+# configure a Python server), so a probe that strips it reports an error for
+# a server that works in every session.
+_SPEC_ENV_DENIED_PREFIXES: tuple[str, ...] = (
+    "LD_",
+    "DYLD_",
+)
+
+
+def sanitize_spec_env(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
+    """Drop loader/interpreter-injection keys from a spec-declared env.
+
+    For spawn paths that apply a config-declared ``env`` to a child THEY
+    launch (the cron tool bridge, the probe). The declared env is config-file
+    text — the same trust level as the command itself, which those paths
+    already refuse to run unsandboxed — so a key that executes code in the
+    launcher before confinement is established must not pass through.
+
+    Matching is case-INSENSITIVE on purpose: Windows environment variables
+    are case-insensitive, so ``pythonpath`` reaches Python exactly like
+    ``PYTHONPATH`` there. On POSIX a lowercase spelling is inert, and
+    dropping it anyway costs a benign oddly-named variable at most — the
+    asymmetry (fail closed everywhere vs. bypass on one OS) decides it.
+    Dropped keys are logged at WARNING: a spec relying on one is broken by
+    policy, not by accident, and silence would read as the credential-drop
+    bug this sanitizer's caller exists to fix.
+    """
+    out: dict[str, str] = {}
+    for key, value in pairs:
+        folded = key.upper()
+        if any(folded.startswith(p) for p in _SPEC_ENV_DENIED_PREFIXES):
+            logger.warning(
+                "dropping spec env key %r: loader/interpreter injection channel", key
+            )
+            continue
+        out[key] = value
+    return out
+
+
+def emit_env(env: dict) -> dict:
+    """Normalize an MCP spec's ``env`` for emission into a consumed config file.
+
+    The single normalization point for every surface some OTHER process
+    launches MCP servers from: the agent config (kiro-cli sessions), the
+    kiro-global ``mcp.json`` (ACP runtime), and the Claude Code ``~/.mcp.json``
+    sidecar. Each of those spawners applies a declared ``env`` per key, so a
+    declared ``PATH`` replaces the child's inherited one — the same premise
+    :func:`spec_env_path` documents. Routing every writer through one function
+    is what keeps the surfaces from diverging: a writer that forgets to expand
+    is a server that starts under the probe and dies in a session.
+
+    Returns a NEW dict; the caller's env (typically a source config's own
+    object reached through a shallow copy) is never mutated through. The
+    ``PATH`` branches, exhaustively: a STRING — empty included — is expanded
+    via :func:`spec_env_path`, because that is exactly what the probe and the
+    command resolver do with it (``spec_env_path("")`` yields the augmented
+    inherited PATH), and emitting the raw empty string instead hands the
+    session a child with NO path at all while the probe shows green — the
+    divergence this function exists to close. A NON-string passes through
+    verbatim: rewriting a malformed value would hide the config error behind
+    a working-looking PATH, and the consumer's own rejection is the honest
+    surface for it. Every other key passes through untouched.
+    """
+    path = env.get("PATH")
+    if isinstance(path, str):
+        return {**env, "PATH": spec_env_path(path)}
+    return dict(env)
 
 
 @functools.lru_cache(maxsize=1)

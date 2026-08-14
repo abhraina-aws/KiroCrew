@@ -583,6 +583,29 @@ class TestServerDetail:
         }
         assert sandbox.synced == [("srv", True, False)]
 
+    @pytest.mark.asyncio
+    async def test_put_expands_a_declared_env_path(
+        self, sandbox: SimpleNamespace, monkeypatch
+    ) -> None:
+        """The global file is consumed by the ACP runtime (per-key env), so a
+        registered PATH fragment must be emitted complete. See env.emit_env."""
+        import os
+
+        monkeypatch.setenv("PATH", "/usr/bin")
+        resp = await mcp_mod.api_mcp_server_detail(
+            _request(
+                {"command": "node", "env": {"PATH": "/opt/shims", "K": "v"}},
+                match_info={"name": "srv"},
+                method="PUT",
+            )
+        )
+        assert resp.status == 200
+        written = _read_global(sandbox)["srv"]["env"]
+        entries = written["PATH"].split(os.pathsep)
+        assert entries[0] == "/opt/shims", "caller-authored entries stay first"
+        assert "/usr/bin" in entries, "inherited PATH must survive the override"
+        assert written["K"] == "v"
+
 
 # ── GET /api/mcp/active ─────────────────────────────────────────────────
 
@@ -1807,3 +1830,42 @@ class TestSyncFileLock:
 
 
 # ── POST /api/mcp-gateway/apps-enable ───────────────────────────────────
+
+
+# ── config status (staleness banner endpoint) ───────────────────────────
+
+
+class TestConfigStatus:
+    """GET /api/mcp/config-status — the one bit behind the staleness banner."""
+
+    @pytest.mark.asyncio
+    async def test_reports_watch_state(self, monkeypatch) -> None:
+        from kiro_crew import mcp_watch
+
+        monkeypatch.setattr(mcp_watch, "_config_generation", 3)
+        monkeypatch.setattr(mcp_watch, "_sessions_reset_generation", 2)
+
+        resp = await mcp_mod.api_mcp_config_status(_request(method="GET"))
+        body = json.loads(resp.body)
+        assert body == {"generation": 3, "sessionsStale": True}
+
+    @pytest.mark.asyncio
+    async def test_fresh_state_is_not_stale(self, monkeypatch) -> None:
+        from kiro_crew import mcp_watch
+
+        monkeypatch.setattr(mcp_watch, "_config_generation", 0)
+        monkeypatch.setattr(mcp_watch, "_sessions_reset_generation", 0)
+
+        resp = await mcp_mod.api_mcp_config_status(_request(method="GET"))
+        body = json.loads(resp.body)
+        assert body["sessionsStale"] is False
+
+
+class TestInvalidateProbeCache:
+    def test_resets_only_the_freshness_clock(self, monkeypatch) -> None:
+        """Rows survive (last-known tools feed the overlay); the TTL does not."""
+        monkeypatch.setattr(mcp_mod, "_mcp_probe_ts", 999.0)
+        monkeypatch.setattr(mcp_mod, "_mcp_probe_cache", [{"name": "srv"}])
+        mcp_mod.invalidate_probe_cache()
+        assert mcp_mod._mcp_probe_ts == 0.0
+        assert mcp_mod._mcp_probe_cache == [{"name": "srv"}]

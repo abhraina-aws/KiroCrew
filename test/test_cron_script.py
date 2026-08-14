@@ -460,7 +460,7 @@ class TestResolveMcpServer:
         (agents_dir / "kirocrew.json").write_text(json.dumps(config))
         with patch("pathlib.Path.home", return_value=tmp_path):
             result = _resolve_mcp_server("test-server")
-        assert result == ("node", "server.js", "--port", "3000")
+        assert result == (("node", "server.js", "--port", "3000"), ())
 
 
 class TestExceptionClasses:
@@ -939,7 +939,7 @@ class TestResolveMcpServerAimFallback:
         (agents_dir / "my-kirocrew-agent.json").write_text(json.dumps(config))
         with patch("pathlib.Path.home", return_value=tmp_path):
             result = _resolve_mcp_server("builder-mcp")
-        assert result == ("npx", "-y", "builder-mcp")
+        assert result == (("npx", "-y", "builder-mcp"), ())
 
     def test_server_not_in_config(self, tmp_path):
         agents_dir = tmp_path / ".kiro" / "agents"

@@ -31,11 +31,8 @@ from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.executors import subprocess_executor
 from kiro_crew.history import SEARCH_MIN_CHARS, _archive_dir, is_incognito_transcript
 from kiro_crew.llm_helpers import run_bg_oneliner
-from kiro_crew.mcp_discovery import (
-    discover_servers_to_sync,
-    register_servers_for_cc,
-    sync_to_agent_config,
-)
+from kiro_crew.mcp_discovery import sync_discovered_servers
+from kiro_crew.mcp_watch import mark_sessions_reset
 from kiro_crew.sandbox import (
     cgroup_scope_argv,
     configured_sandbox_mode,
@@ -1654,7 +1651,7 @@ async def api_session_tool_policy(request: web.Request) -> web.Response:
     return web.json_response(policy)
 
 
-async def _reset_all_sessions(request: web.Request) -> int:
+async def _reset_all_sessions(request: web.Request, *, mcp_synced: bool = True) -> int:
     """Reset all active sessions so they pick up config changes.
 
     Reloads provider factory (handles provider switch ACP→CC or vice versa),
@@ -1662,6 +1659,11 @@ async def _reset_all_sessions(request: web.Request) -> int:
     processes loaded the old MCP config at spawn time).
     New sessions cold-start on next message.
     Returns the number of sessions reset.
+
+    ``mcp_synced=False`` says the caller's MCP reconcile FAILED before this
+    reset: the on-disk agent config may still be stale, so the restart must
+    not clear the staleness banner — marking the generation current would
+    acknowledge a change that was never applied.
     """
     state: DashboardState = request.app["state"]
     sessions = state.sessions
@@ -1722,6 +1724,14 @@ async def _reset_all_sessions(request: web.Request) -> int:
     state._background_tasks.add(task)
     task.add_done_callback(state._background_tasks.discard)
 
+    # Every live session is gone and the next ones cold-start against the
+    # config as it exists NOW — record that, so the staleness banner
+    # (mcp_watch.sessions_stale) clears the moment a reset actually happens.
+    # Skipped when the caller's reconcile failed: the on-disk config may not
+    # reflect the sources yet, and clearing the banner would say it does.
+    if mcp_synced:
+        mark_sessions_reset()
+
     return count
 
 
@@ -1735,26 +1745,26 @@ async def api_sessions_restart(request: web.Request) -> web.Response:
     installed servers (e.g. via AIM) are picked up on restart.
     """
     # Sync MCP servers before restarting so new installs take effect.
-    # Run in thread — discover/sync do blocking file I/O and subprocess calls.
-    # Cap at 30s so a hung kiro-cli subprocess doesn't stall the restart.
+    # Run in thread — the sync does blocking file I/O. Cap at 30s so a hung
+    # rebuild doesn't stall the restart. sync_discovered_servers serializes
+    # against the /api/mcp/sync handler's run of the same sequence.
     synced = 0
+    sync_ok = True
     try:
-
-        async def _sync() -> int:
-            to_sync = await asyncio.to_thread(discover_servers_to_sync)
-            if to_sync:
-                ok: bool = await asyncio.to_thread(sync_to_agent_config, to_sync)
-                # Register for CC unconditionally (CC uses its own .mcp.json)
-                await asyncio.to_thread(register_servers_for_cc, to_sync)
-                if ok:
-                    return len(to_sync)
-            return 0
-
-        synced = await asyncio.wait_for(_sync(), timeout=30)
+        to_sync = await asyncio.wait_for(
+            asyncio.to_thread(sync_discovered_servers), timeout=30
+        )
+        synced = len(to_sync)
     except Exception:
+        # The restart still proceeds (it applies whatever IS on disk), but the
+        # failure is reported and the staleness banner stays armed — marking
+        # the generation current would acknowledge a change never applied.
+        sync_ok = False
         logger.warning("MCP server sync failed before restart", exc_info=True)
-    count = await _reset_all_sessions(request)
-    return web.json_response({"ok": True, "sessions_reset": count, "mcp_synced": synced})
+    count = await _reset_all_sessions(request, mcp_synced=sync_ok)
+    return web.json_response(
+        {"ok": True, "sessions_reset": count, "mcp_synced": synced, "mcp_sync_ok": sync_ok}
+    )
 
 
 async def api_session_archive_list(request: web.Request) -> web.Response:

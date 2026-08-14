@@ -86,9 +86,20 @@ same server's spec from the other sources in priority order (kirocrew, then
 kiro-global, then provider-global) before dropping it. When it falls back to a
 different source it adopts that source's `command`, `args` and `env` **as a
 unit**, so one source's command is never paired with another's arguments.
-Resolution uses the same `augmented_path()` the probe uses, so a server cannot
-probe healthy on the dashboard while being silently dropped from the agent
-config.
+Resolution, the dashboard probe, and the `env.PATH` written into the agent
+config all go through the same `env.spec_env_path()`, so a server cannot probe
+healthy on the dashboard while being silently dropped from the agent config —
+or launched from it with a PATH the probe never validated.
+
+A spec's `env` is applied per key by the consumer that spawns the server, so a
+declared `PATH` **replaces** the child's inherited one rather than extending it.
+A spec that names one directory to add would therefore hand the server a PATH
+holding only that directory. `spec_env_path()` expands a declared `env.PATH`
+into the full effective PATH — the spec's own entries first, then the augmented
+inherited PATH, deduped — before it is written out. Consequence to know about:
+the emitted value is a snapshot of the rebuild-time environment, so it encodes
+this host's directories (mise data dir, installed Node version bins, the
+running interpreter's bin) and is not portable to another machine.
 
 ### `includeMcpJson` is pinned false
 
@@ -184,10 +195,22 @@ Probes run from `POST /api/mcp/probe`:
 - **stdio** servers are spawned and driven through an MCP `initialize` handshake
   followed by `tools/list`.
 - **HTTP** servers get the same two JSON-RPC calls over POST.
+- **Both calls must succeed for `ok`.** An initialize that answers and a
+  `tools/list` that does not (no response, an error reply, a non-200) is a
+  server no session can get a tool out of — the badge certifies "tools usable",
+  so that combination reports as an error naming `tools/list`, not as `ok` with
+  an empty list.
+- Every result carries **`probedAt`** (wall-clock seconds of the probe that
+  produced the status) and **`probeMode`** (`handshake` for a real round trip,
+  `declared` for the managed in-process fallback below). Both ride the cache
+  into the API payload, so the UI can say *when* a status was true — the caches
+  legitimately serve results up to their TTL, and an undated "Online" reads as
+  "now".
 - Timeout is `dashboard.mcp_probe_timeout_secs` (default 15s;
   `_PROBE_TIMEOUT_SECS` is the fallback if config is not loaded yet). Results
   are cached for `_PROBE_TTL_SECS` (1800s), after which status reads as
-  "outdated".
+  "outdated" — with `probedAt` preserved, because *when it was last true* is
+  the most useful thing an outdated row can say.
 - The handshake response is kept, not just the tool names: advertised
   `capabilities`, the `protocolVersion` the server ANSWERED with, `serverInfo`,
   and per-tool `annotations`. These feed the shareability verdict (below); the
@@ -241,7 +264,10 @@ Probes run from `POST /api/mcp/probe`:
     - The substitution is logged at **WARNING**, once per server: `ok` here means
       "this package declares these tools", not "the server answered", and the
       default log level is WARNING, so at info it would be invisible on exactly the
-      hosts where it always happens. Third-party servers have no declaration to
+      hosts where it always happens. The result also carries
+      `probeMode: "declared"` into the cache and the API payload, so the
+      dashboard renders the substitution instead of an indistinguishable green
+      badge. Third-party servers have no declaration to
       read and keep the honest `mcp_probe_sandbox_unavailable` error.
     - Modules are imported **lazily** (they pull in the validation/artifacts graph,
       which cannot be imported at `mcp_discovery` import time). Any failure returns
@@ -306,7 +332,58 @@ remove`, hand-edits) are picked up naturally.
 
 Apply does **not** restart sessions. Scope changes take effect at the next
 session spawn; the header's Apply & Restart calls `POST /api/sessions/restart`
-to drain the warm pool of pre-spawned processes carrying the old config.
+to drain the warm pool of pre-spawned processes carrying the old config. The
+config watcher below is what tells the user that this step is still owed.
+
+## The config watcher and the staleness signal
+
+Source: `mcp_watch.py`.
+
+A kiro-cli session's MCP tool table is **frozen at process spawn** — no config
+edit ever reaches a live session, and the only remedy is a session restart.
+The system cannot change that, but it can stop making the user guess. At boot
+the gateway starts `watch_mcp_sources()`, a 15-second mtime poller over the
+source config files (the two core `mcp.json` scopes plus every
+seam-contributed provider global). A poller rather than OS file watching on
+purpose: three small files at that cadence cost nothing, need no per-platform
+backend, and cannot miss an editor's atomic-rename-over dance.
+
+On an observed change the watcher:
+
+1. bumps the **config generation** counter,
+2. runs `sync_discovered_servers()` — the same serialized discover→write entry
+   point the handlers use — so the consumed configs match the sources without
+   anyone pressing a button,
+3. re-probes (`probe_all()`) and invalidates the handler-level response cache,
+   so the dashboard reflects the new reality without waiting out a TTL.
+
+`GET /api/mcp/config-status` reports `{generation, sessionsStale}`.
+`sessionsStale` is true when the generation moved after the last full session
+reset (`_reset_all_sessions` records the generation it restarted against), and
+it is the one bit behind the dashboard's global "MCP configuration changed —
+restart sessions to apply" banner (`McpStaleBanner.tsx`, polled every 30s,
+dismissible per generation). The generation counters are gateway-lifetime:
+a restart resets both together, which is correct because a fresh gateway
+spawns fresh sessions from the current config.
+
+The sync itself is a single entry point on purpose. `sync_discovered_servers()`
+holds a module mutex across discovery, the agent-config rebuild, and the Claude
+Code sidecar write; `POST /api/mcp/sync`, the sessions-restart pre-sync, and
+the watcher all run the same function, so two of them landing at once cannot
+interleave their read-modify-writes. The `kiro-cli mcp add` subprocess that
+used to run inside `sync_to_agent_config()` is gone: it was an unsynchronized
+second writer of the same file, serialized env values without normalization,
+and everything it wrote was overwritten by `install_agent()` moments later.
+
+Every file another process launches MCP servers from is written through one
+env normalization point, `env.emit_env()`: the agent config emit, the
+kiro-global entries the sync creates, and the Claude Code `~/.mcp.json`
+sidecar. A declared `env.PATH` is expanded via `spec_env_path()`; a spec with
+no `PATH` passes through byte-identical. The cron script tool bridge
+(`cron_script.McpToolClient`, behind `ctx.call_tool()`) reads the emitted spec
+and merges its declared `env` over the inherited environment before spawning —
+it used to drop the `env` field entirely, so a server taking its credential
+from the declarative env silently ran without it in script crons.
 
 ## How app agents reach MCP servers
 

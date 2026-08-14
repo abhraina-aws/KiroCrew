@@ -66,6 +66,7 @@ def register(app: web.Application) -> None:
     app.router.add_put("/api/mcp/custom/{name}", api_mcp_custom_update)
     app.router.add_post("/api/mcp/probe", handlers.api_mcp_probe)
     app.router.add_get("/api/mcp/probe", handlers.api_mcp_probe_cached)
+    app.router.add_get("/api/mcp/config-status", handlers.api_mcp_config_status)
     app.router.add_post("/api/mcp/sync", handlers.api_mcp_sync)
     app.router.add_post("/api/mcp/apply", handlers.api_mcp_apply)
     app.router.add_post("/api/mcp/toggle", handlers.api_mcp_toggle)

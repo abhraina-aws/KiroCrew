@@ -605,7 +605,9 @@ class TestScriptContextAudit:
 @pytest.fixture
 def mcp_spawn(monkeypatch):
     """Patch the spawn chain so McpToolClient never starts a real process."""
-    monkeypatch.setattr(cron_script, "_resolve_mcp_server", lambda name: ("srv-bin", "--stdio"))
+    monkeypatch.setattr(
+        cron_script, "_resolve_mcp_server", lambda name: (("srv-bin", "--stdio"), ())
+    )
     monkeypatch.setattr(cron_script, "wrap_argv", lambda argv, **k: (list(argv), None))
     monkeypatch.setattr(cron_script, "cgroup_scope_argv", lambda argv: list(argv))
     monkeypatch.setattr(cron_script, "resource_limit_preexec", lambda: None)
@@ -671,6 +673,51 @@ class TestMcpToolClientSpawn:
         assert "disconnected during 'initialize'" in msg
         assert "rc=127" in msg
         assert "(empty)" in msg
+
+    def test_declared_env_reaches_the_child(self, mcp_spawn, monkeypatch):
+        """The spec's env rides into Popen — a server whose credential arrives
+        through the declarative env must not silently run without it."""
+        monkeypatch.setattr(
+            cron_script,
+            "_resolve_mcp_server",
+            lambda name: (("srv-bin",), (("API_TOKEN", "sekret"), ("PATH", "/opt/only"))),
+        )
+        monkeypatch.setenv("INHERITED_VAR", "still-here")
+        mcp_spawn.proc = _FakeProc(out_lines=["\n", _HANDSHAKE_OK])
+
+        client = McpToolClient("kirocrew-core")
+
+        assert len(mcp_spawn.calls) == 1
+        _argv, kw = mcp_spawn.calls[0]
+        env = kw["env"]
+        assert env["API_TOKEN"] == "sekret"
+        # Per-key override: a declared key replaces, everything else inherits.
+        assert env["PATH"] == "/opt/only"
+        assert env["INHERITED_VAR"] == "still-here"
+        client.close()
+
+    def test_declared_loader_env_never_reaches_the_launcher(self, mcp_spawn, monkeypatch):
+        """A hostile spec env naming a loader-injection variable (LD_PRELOAD,
+        DYLD_*, PYTHONSTARTUP) must be dropped: it would execute in the sandbox
+        LAUNCHER's process, before any confinement exists."""
+        monkeypatch.setattr(
+            cron_script,
+            "_resolve_mcp_server",
+            lambda name: (
+                ("srv-bin",),
+                (("LD_PRELOAD", "/tmp/evil.so"), ("TOKEN", "t")),
+            ),
+        )
+        monkeypatch.delenv("LD_PRELOAD", raising=False)
+        mcp_spawn.proc = _FakeProc(out_lines=["\n", _HANDSHAKE_OK])
+
+        client = McpToolClient("kirocrew-core")
+
+        _argv, kw = mcp_spawn.calls[0]
+        env = kw["env"]
+        assert "LD_PRELOAD" not in env
+        assert env["TOKEN"] == "t"
+        client.close()
 
 
 class TestMcpToolClientRpc:
@@ -863,7 +910,7 @@ class TestResolveMcpServer:
         )
         monkeypatch.setattr(cron_script, "kiro_agents_dir", lambda: agents)
 
-        assert _resolve_mcp_server("core") == ("node", "srv.js")
+        assert _resolve_mcp_server("core") == (("node", "srv.js"), ())
 
     def test_absent_server_entry_returns_none(self, tmp_path, monkeypatch):
         agents = tmp_path / "agents"
@@ -883,7 +930,32 @@ class TestResolveMcpServer:
         )
         monkeypatch.setattr(cron_script, "kiro_agents_dir", lambda: agents)
 
-        assert _resolve_mcp_server("bare") == ("srv-bin",)
+        assert _resolve_mcp_server("bare") == (("srv-bin",), ())
+
+    def test_declared_env_is_returned_with_non_strings_dropped(self, tmp_path, monkeypatch):
+        """env travels with the command; only string values survive (Popen
+        would reject anything else at spawn time, far from the config error)."""
+        agents = tmp_path / "agents"
+        agents.mkdir()
+        (agents / "kirocrew.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "srv": {
+                            "command": "x",
+                            "env": {"TOKEN": "t", "BAD": 5, "PATH": "/opt/only"},
+                        }
+                    }
+                }
+            ),
+            newline="\n",
+        )
+        monkeypatch.setattr(cron_script, "kiro_agents_dir", lambda: agents)
+
+        resolved = _resolve_mcp_server("srv")
+        assert resolved is not None
+        _argv, env_pairs = resolved
+        assert dict(env_pairs) == {"TOKEN": "t", "PATH": "/opt/only"}
 
 
 # ── path + secret resolution ──

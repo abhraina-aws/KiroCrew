@@ -4,6 +4,52 @@ All notable changes to KiroCrew are documented in this file.
 
 ## [Unreleased]
 
+- **An MCP server that declares `env.PATH` no longer loses its inherited PATH.**
+  A spec's `env` is applied per key, so naming one directory to add — a Node
+  version manager's shim dir, say — replaced the child's PATH instead of
+  extending it, leaving the server with only that one directory. A launcher that
+  execs a sibling binary then died with "not found" for a binary that was
+  plainly installed, while the dashboard probe — which merged rather than
+  replaced — reported the same server healthy, so nothing in the UI
+  distinguished it from a working server. The full effective PATH (the spec's
+  own entries first, deduped) now backs the probe, command resolution, and the
+  value written into the agent config, so "probes healthy" and "works in a
+  session" can no longer disagree.
+
+- **Every emitted MCP config surface now goes through one env normalization
+  point (`env.emit_env`).** The agent config, the kiro-global entries the sync
+  creates, and the Claude Code `~/.mcp.json` sidecar all expand a declared
+  `env.PATH` the same way, so a server can no longer work under one consumer
+  and die under another. The cosmetic `kiro-cli mcp add` subprocess inside the
+  sync — an unsynchronized second writer whose output the rebuild overwrote —
+  is removed, and the discover→write sequence is a single mutex-serialized
+  entry point (`sync_discovered_servers`) shared by the sync endpoint, the
+  restart pre-sync, and the config watcher, closing their read-modify-write
+  race.
+
+- **Script crons no longer strip a server's declared `env`.** The cron tool
+  bridge (`ctx.call_tool()`) spawned MCP servers with command+args alone, so a
+  server taking its API key or PATH from the spec's declarative `env` silently
+  ran without them. The declared env now merges over the inherited environment,
+  matching the per-key override every other spawn chain applies.
+
+- **The Online badge now means "tools usable", dated.** A probe whose
+  `initialize` succeeds but whose `tools/list` fails reports an error instead
+  of `ok` with an empty list; every probe result carries `probedAt` so the
+  dashboard can show when a status was established instead of presenting a
+  cached one as current; and a managed server served from its in-process
+  declaration is marked `declared` — the tool list is correct, but nothing
+  verified the server can start — instead of rendering identically to a
+  handshake-proven server.
+
+- **MCP config changes are detected and reconciled automatically.** A watcher
+  polls the source `mcp.json` files; on a change it syncs the consumed configs,
+  re-probes, and arms a session-staleness signal
+  (`GET /api/mcp/config-status`). Because a session's MCP tool table is frozen
+  at spawn time, the dashboard now shows a "MCP configuration changed — restart
+  sessions to apply" banner until sessions are actually restarted, instead of
+  leaving the user to discover the freeze by debugging.
+
 - **A lesson from a previous embedding-model generation could no longer get
   silently deleted or offered as a false contradiction.** `write_lesson`'s
   semantic dedup and `find_contradiction_candidates` compared raw embeddings

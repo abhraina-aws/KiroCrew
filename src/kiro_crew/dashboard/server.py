@@ -142,6 +142,7 @@ from kiro_crew.hooks import ScriptHookStore, set_global_hook_store
 from kiro_crew.instances.registry import InstancesRegistry
 from kiro_crew.instances.ssh_tunnel_manager import SshTunnelManager, TunnelState
 from kiro_crew.mcp_gateway.socketsec import chmod_socket_0600
+from kiro_crew.mcp_watch import watch_mcp_sources
 from kiro_crew.metrics.http_metrics import (
     make_route_latency_middleware,
     record_boot_to_ready,
@@ -3063,6 +3064,13 @@ async def start_dashboard(
     _snap_pruner = asyncio.create_task(_prune_browser_snapshots_loop())
     _snap_pruner.add_done_callback(lambda t: t.result() if not t.cancelled() else None)
     state._browser_snapshot_pruner = _snap_pruner  # prevent GC
+
+    # Watch the MCP source configs: a change auto-syncs the consumed configs,
+    # re-probes, and arms the "restart sessions to apply" staleness signal.
+    # See kiro_crew.mcp_watch for why this is a poller and what it fixes.
+    _mcp_watcher = asyncio.create_task(watch_mcp_sources())
+    state._background_tasks.add(_mcp_watcher)
+    _mcp_watcher.add_done_callback(state._background_tasks.discard)
 
     # Start terminal title poller (pushes live foreground-command / cwd titles)
     _title_poller = asyncio.create_task(handlers.poll_terminal_titles(app))

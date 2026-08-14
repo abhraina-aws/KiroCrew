@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 from kiro_crew import platform_compat
 from kiro_crew.config.loader import config_dir, read_local_secret
 from kiro_crew.config.paths import kiro_agents_dir
+from kiro_crew.env import sanitize_spec_env
 from kiro_crew.loopback_http import loopback_urlopen
 from kiro_crew.sandbox import (
     _AGENT_DENIED_ENV_KEYS,
@@ -356,9 +357,22 @@ class McpToolClient:
 
     def __init__(self, server_name: str):
         self._server_name = server_name
-        argv = _resolve_mcp_server(server_name)
-        if not argv:
+        resolved = _resolve_mcp_server(server_name)
+        if not resolved:
             raise RuntimeError(f"MCP server '{server_name}' not found in agent config")
+        argv, env_pairs = resolved
+        # Merge the spec's declared env over the inherited one — the same
+        # per-key override every other spawn chain applies. Without it a
+        # server configured to receive its credential or PATH through the
+        # spec's ``env`` silently ran without them here. The agent config's
+        # PATH is already fully expanded at emit time (env.emit_env), so the
+        # override is complete. Sanitized first: the declared env is
+        # config-file text applied to the LAUNCHER's environment, so loader/
+        # interpreter injection keys (LD_PRELOAD, DYLD_*, PYTHONSTARTUP, ...)
+        # would execute before the sandbox confines anything — see
+        # env.sanitize_spec_env.
+        env = dict(os.environ)
+        env.update(sanitize_spec_env(env_pairs))
         sandboxed_argv, self._sandbox_cleanup = wrap_argv(list(argv), mode="standard")
         sandboxed_argv = cgroup_scope_argv(sandboxed_argv)  # cgroup DoS ceiling
         # Capture stderr to a tempfile instead of DEVNULL so spawn/handshake
@@ -375,6 +389,7 @@ class McpToolClient:
                 stdout=subprocess.PIPE,
                 stderr=self._stderr_file,
                 text=True,
+                env=env,
                 preexec_fn=resource_limit_preexec(),
             )
         except Exception:
@@ -493,8 +508,16 @@ class McpToolClient:
 
 
 @lru_cache(maxsize=16)
-def _resolve_mcp_server(name: str) -> tuple[str, ...] | None:
-    """Read MCP server command from agent config (cached per process)."""
+def _resolve_mcp_server(name: str) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]] | None:
+    """Read MCP server command AND declared env from the agent config (cached).
+
+    The env travels with the command on purpose: a server that takes its API
+    key or token from the spec's declarative ``env`` is broken by a client
+    that spawns command+args alone — the child silently inherits the cron
+    process's environment and the credential never arrives. Returned as a
+    tuple-of-pairs (not a dict) so the lru_cache holds an immutable value no
+    caller can mutate through.
+    """
     cfg_path = kiro_agents_dir() / "kirocrew.json"
     if not cfg_path.exists():
         # Fall back to any kirocrew-named agent spec in the same agents dir.
@@ -507,7 +530,11 @@ def _resolve_mcp_server(name: str) -> tuple[str, ...] | None:
     spec = cfg.get("mcpServers", {}).get(name)
     if not spec:
         return None
-    return tuple([spec["command"]] + spec.get("args", []))
+    env = spec.get("env")
+    env_pairs = tuple(
+        (k, v) for k, v in (env.items() if isinstance(env, dict) else ()) if isinstance(v, str)
+    )
+    return tuple([spec["command"]] + spec.get("args", [])), env_pairs
 
 
 def _split_script_spec(script_path: str) -> tuple[str, str]:
